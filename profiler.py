@@ -7,12 +7,33 @@ import tempfile
 import os
 import sys
 import shutil
+import time
 from typing import Dict, Any
 
 def run_perf_stat(binary: str, args: list) -> Dict[str, Any]:
-    cmd = ["perf", "stat", "-e",
-           "task-clock,instructions,cycles,branches,branch-misses,cache-misses,context-switches,cpu-migrations,page-faults",
-           binary] + args
+    # Extended event list for comprehensive performance analysis
+    events = [
+        # Core timing and execution
+        "task-clock,instructions,cycles,ref-cycles",
+        # Branching
+        "branches,branch-misses",
+        # L1 Data Cache
+        "L1-dcache-loads,L1-dcache-load-misses,L1-dcache-stores",
+        # L1 Instruction Cache
+        "L1-icache-loads,L1-icache-load-misses",
+        # Last Level Cache (LLC/L3)
+        "LLC-loads,LLC-load-misses,LLC-stores,LLC-store-misses",
+        # TLB (Translation Lookaside Buffer)
+        "dTLB-loads,dTLB-load-misses,iTLB-loads,iTLB-load-misses",
+        # Pipeline stalls
+        "stalled-cycles-frontend,stalled-cycles-backend",
+        # System events
+        "context-switches,cpu-migrations,page-faults,minor-faults,major-faults",
+        # Alignment and other faults
+        "alignment-faults,emulation-faults",
+    ]
+    
+    cmd = ["perf", "stat", "-e", ",".join(events), binary] + args
     with tempfile.NamedTemporaryFile(delete=False, mode="w+") as tmp:
         try:
             result = subprocess.run(cmd, stdout=tmp, stderr=subprocess.STDOUT, text=True)
@@ -21,32 +42,105 @@ def run_perf_stat(binary: str, args: list) -> Dict[str, Any]:
             output = tmp.read()
         finally:
             os.unlink(tmp.name)
+    
     metrics = {}
     for line in output.splitlines():
-        if "task-clock" in line:
-            metrics["task_clock_ms"] = float(line.split()[0].replace(",", ""))
-        elif "instructions" in line and "insn per cycle" in line:
-            metrics["instructions"] = int(line.split()[0].replace(",", ""))
-        elif "cycles" in line and "GHz" in line:
-            metrics["cycles"] = int(line.split()[0].replace(",", ""))
-        elif "branches" in line and "M/sec" in line:
-            metrics["branches"] = int(line.split()[0].replace(",", ""))
-        elif "branch-misses" in line:
-            metrics["branch_misses"] = int(line.split()[0].replace(",", ""))
-        elif "cache-misses" in line:
-            metrics["cache_misses"] = int(line.split()[0].replace(",", ""))
-        elif "context-switches" in line:
-            metrics["context_switches"] = int(line.split()[0].replace(",", ""))
-        elif "cpu-migrations" in line:
-            metrics["cpu_migrations"] = int(line.split()[0].replace(",", ""))
-        elif "page-faults" in line:
-            metrics["page_faults"] = int(line.split()[0].replace(",", ""))
-        elif "seconds time elapsed" in line:
-            metrics["elapsed_s"] = float(line.strip().split()[0])
-        elif "seconds user" in line:
-            metrics["user_s"] = float(line.strip().split()[0])
-        elif "seconds sys" in line:
-            metrics["sys_s"] = float(line.strip().split()[0])
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        
+        try:
+            value_str = parts[0].replace(",", "").replace("<not", "").replace("supported>", "").strip()
+            if not value_str or value_str == "":
+                continue
+            value = float(value_str) if "." in value_str else int(value_str)
+        except (ValueError, IndexError):
+            continue
+        
+        line_lower = line.lower()
+        
+        # Timing
+        if "task-clock" in line_lower and "msec" in line_lower:
+            metrics["task_clock_ms"] = float(parts[0].replace(",", ""))
+        elif "seconds time elapsed" in line_lower:
+            metrics["elapsed_s"] = float(parts[0])
+        elif "seconds user" in line_lower:
+            metrics["user_s"] = float(parts[0])
+        elif "seconds sys" in line_lower:
+            metrics["sys_s"] = float(parts[0])
+        
+        # Core execution
+        elif "instructions" in line_lower and "insn per cycle" in line_lower:
+            metrics["instructions"] = value
+        elif "cycles" in line_lower and "ghz" in line_lower:
+            metrics["cycles"] = value
+        elif "ref-cycles" in line_lower or "reference cycles" in line_lower:
+            metrics["ref_cycles"] = value
+        
+        # Branching
+        elif "branches" in line_lower and "m/sec" in line_lower:
+            metrics["branches"] = value
+        elif "branch-misses" in line_lower:
+            metrics["branch_misses"] = value
+        
+        # L1 Data Cache
+        elif "l1-dcache-loads" in line_lower or "l1d.replacement" in line_lower:
+            metrics["l1_dcache_loads"] = value
+        elif "l1-dcache-load-misses" in line_lower:
+            metrics["l1_dcache_load_misses"] = value
+        elif "l1-dcache-stores" in line_lower:
+            metrics["l1_dcache_stores"] = value
+        
+        # L1 Instruction Cache
+        elif "l1-icache-loads" in line_lower or "l1i.replacement" in line_lower:
+            metrics["l1_icache_loads"] = value
+        elif "l1-icache-load-misses" in line_lower:
+            metrics["l1_icache_load_misses"] = value
+        
+        # LLC (L3)
+        elif "llc-loads" in line_lower:
+            metrics["llc_loads"] = value
+        elif "llc-load-misses" in line_lower:
+            metrics["llc_load_misses"] = value
+        elif "llc-stores" in line_lower:
+            metrics["llc_stores"] = value
+        elif "llc-store-misses" in line_lower:
+            metrics["llc_store_misses"] = value
+        
+        # TLB
+        elif "dtlb-loads" in line_lower:
+            metrics["dtlb_loads"] = value
+        elif "dtlb-load-misses" in line_lower:
+            metrics["dtlb_load_misses"] = value
+        elif "itlb-loads" in line_lower:
+            metrics["itlb_loads"] = value
+        elif "itlb-load-misses" in line_lower:
+            metrics["itlb_load_misses"] = value
+        
+        # Stalls
+        elif "stalled-cycles-frontend" in line_lower:
+            metrics["stalled_cycles_frontend"] = value
+        elif "stalled-cycles-backend" in line_lower:
+            metrics["stalled_cycles_backend"] = value
+        
+        # System
+        elif "context-switches" in line_lower:
+            metrics["context_switches"] = value
+        elif "cpu-migrations" in line_lower:
+            metrics["cpu_migrations"] = value
+        elif "page-faults" in line_lower and "major" not in line_lower and "minor" not in line_lower:
+            metrics["page_faults"] = value
+        elif "minor-faults" in line_lower:
+            metrics["minor_faults"] = value
+        elif "major-faults" in line_lower:
+            metrics["major_faults"] = value
+        
+        # Faults
+        elif "alignment-faults" in line_lower:
+            metrics["alignment_faults"] = value
+        elif "emulation-faults" in line_lower:
+            metrics["emulation_faults"] = value
+    
     return metrics
 
 def run_time_v_timing(binary: str, args: list) -> Dict[str, Any]:
@@ -477,17 +571,164 @@ def main():
                 timing[k] = v
 
     cpu = {}
+    cache = {}
+    memory_access = {}
+    
     if perf_data:
+        # Core CPU metrics
         if "instructions" in perf_data: cpu["instructions"] = perf_data["instructions"]
         if "cycles" in perf_data: cpu["cycles"] = perf_data["cycles"]
+        if "ref_cycles" in perf_data: cpu["ref_cycles"] = perf_data["ref_cycles"]
+        
+        # IPC and frequency
         if "instructions" in perf_data and "cycles" in perf_data and perf_data["cycles"]:
             cpu["ipc"] = round(perf_data["instructions"] / perf_data["cycles"], 6)
+        if "cycles" in perf_data and "ref_cycles" in perf_data and perf_data["ref_cycles"]:
+            cpu["frequency_ratio"] = round(perf_data["cycles"] / perf_data["ref_cycles"], 6)
+        
+        # Pipeline stalls
+        if "stalled_cycles_frontend" in perf_data:
+            cpu["stalled_cycles_frontend"] = perf_data["stalled_cycles_frontend"]
+            if "cycles" in perf_data and perf_data["cycles"]:
+                cpu["frontend_stall_pct"] = round(100.0 * perf_data["stalled_cycles_frontend"] / perf_data["cycles"], 3)
+        if "stalled_cycles_backend" in perf_data:
+            cpu["stalled_cycles_backend"] = perf_data["stalled_cycles_backend"]
+            if "cycles" in perf_data and perf_data["cycles"]:
+                cpu["backend_stall_pct"] = round(100.0 * perf_data["stalled_cycles_backend"] / perf_data["cycles"], 3)
+        
+        # Branching
         if "branches" in perf_data: cpu["branches"] = perf_data["branches"]
         if "branch_misses" in perf_data: cpu["branch_misses"] = perf_data["branch_misses"]
-        if "cache_misses" in perf_data: cpu["cache_misses"] = perf_data["cache_misses"]
+        if "branches" in perf_data and "branch_misses" in perf_data and perf_data["branches"]:
+            cpu["branch_miss_rate_pct"] = round(100.0 * perf_data["branch_misses"] / perf_data["branches"], 6)
+        
         # Instruction rate
         if "instructions" in cpu and "elapsed_s" in timing and timing.get("elapsed_s"):
             cpu["instructions_per_second"] = int(cpu["instructions"] / timing["elapsed_s"])
+        
+        # L1 Data Cache - always include all fields
+        cache["l1d_loads"] = perf_data.get("l1_dcache_loads")
+        cache["l1d_load_misses"] = perf_data.get("l1_dcache_load_misses")
+        cache["l1d_stores"] = perf_data.get("l1_dcache_stores")
+        if perf_data.get("l1_dcache_loads") and perf_data.get("l1_dcache_load_misses"):
+            cache["l1d_miss_rate_pct"] = round(100.0 * perf_data["l1_dcache_load_misses"] / perf_data["l1_dcache_loads"], 6)
+        else:
+            cache["l1d_miss_rate_pct"] = None
+        
+        # L1 Instruction Cache - always include all fields
+        cache["l1i_loads"] = perf_data.get("l1_icache_loads")
+        cache["l1i_load_misses"] = perf_data.get("l1_icache_load_misses")
+        if perf_data.get("l1_icache_loads") and perf_data.get("l1_icache_load_misses"):
+            cache["l1i_miss_rate_pct"] = round(100.0 * perf_data["l1_icache_load_misses"] / perf_data["l1_icache_loads"], 6)
+        else:
+            cache["l1i_miss_rate_pct"] = None
+        
+        # LLC (L3) - always include all fields
+        cache["llc_loads"] = perf_data.get("llc_loads")
+        cache["llc_load_misses"] = perf_data.get("llc_load_misses")
+        cache["llc_stores"] = perf_data.get("llc_stores")
+        cache["llc_store_misses"] = perf_data.get("llc_store_misses")
+        if perf_data.get("llc_loads") and perf_data.get("llc_load_misses"):
+            cache["llc_miss_rate_pct"] = round(100.0 * perf_data["llc_load_misses"] / perf_data["llc_loads"], 6)
+        else:
+            cache["llc_miss_rate_pct"] = None
+        
+        # TLB - always include all fields
+        memory_access["dtlb_loads"] = perf_data.get("dtlb_loads")
+        memory_access["dtlb_load_misses"] = perf_data.get("dtlb_load_misses")
+        memory_access["itlb_loads"] = perf_data.get("itlb_loads")
+        memory_access["itlb_load_misses"] = perf_data.get("itlb_load_misses")
+        if perf_data.get("dtlb_loads") and perf_data.get("dtlb_load_misses"):
+            memory_access["dtlb_miss_rate_pct"] = round(100.0 * perf_data["dtlb_load_misses"] / perf_data["dtlb_loads"], 6)
+        else:
+            memory_access["dtlb_miss_rate_pct"] = None
+        if perf_data.get("itlb_loads") and perf_data.get("itlb_load_misses"):
+            memory_access["itlb_miss_rate_pct"] = round(100.0 * perf_data["itlb_load_misses"] / perf_data["itlb_loads"], 6)
+        else:
+            memory_access["itlb_miss_rate_pct"] = None
+        
+        # Page faults breakdown - always include all fields
+        memory_access["page_faults"] = perf_data.get("page_faults")
+        memory_access["minor_faults"] = perf_data.get("minor_faults")
+        memory_access["major_faults"] = perf_data.get("major_faults")
+        
+        # Alignment and emulation faults - always include
+        memory_access["alignment_faults"] = perf_data.get("alignment_faults")
+        memory_access["emulation_faults"] = perf_data.get("emulation_faults")
+        
+        # Enhanced memory bandwidth estimation - always include all fields
+        # LLC misses represent traffic between cache and RAM (cache line = 64 bytes)
+        cache_line_bytes = 64
+        elapsed = timing.get("elapsed_s", 0)
+        
+        if elapsed > 0:
+            # Read bandwidth from LLC load misses
+            if perf_data.get("llc_load_misses") is not None:
+                read_bytes = perf_data["llc_load_misses"] * cache_line_bytes
+                memory_access["ram_read_bytes"] = read_bytes
+                memory_access["ram_read_mb"] = round(read_bytes / (1024 * 1024), 3)
+                memory_access["ram_read_bandwidth_mbps"] = round(read_bytes / (1024 * 1024 * elapsed), 3)
+            else:
+                memory_access["ram_read_bytes"] = None
+                memory_access["ram_read_mb"] = None
+                memory_access["ram_read_bandwidth_mbps"] = None
+            
+            # Write bandwidth from LLC store misses (if available)
+            if perf_data.get("llc_store_misses") is not None:
+                write_bytes = perf_data["llc_store_misses"] * cache_line_bytes
+                memory_access["ram_write_bytes"] = write_bytes
+                memory_access["ram_write_mb"] = round(write_bytes / (1024 * 1024), 3)
+                memory_access["ram_write_bandwidth_mbps"] = round(write_bytes / (1024 * 1024 * elapsed), 3)
+            else:
+                memory_access["ram_write_bytes"] = None
+                memory_access["ram_write_mb"] = None
+                memory_access["ram_write_bandwidth_mbps"] = None
+            
+            # Total memory bandwidth (read + write)
+            if perf_data.get("llc_load_misses") is not None and perf_data.get("llc_store_misses") is not None:
+                total_bytes = (perf_data["llc_load_misses"] + perf_data["llc_store_misses"]) * cache_line_bytes
+                memory_access["ram_total_bytes"] = total_bytes
+                memory_access["ram_total_mb"] = round(total_bytes / (1024 * 1024), 3)
+                memory_access["ram_total_bandwidth_mbps"] = round(total_bytes / (1024 * 1024 * elapsed), 3)
+                
+                # Percentage breakdown
+                if total_bytes > 0:
+                    memory_access["ram_read_pct"] = round(100.0 * (perf_data["llc_load_misses"] * cache_line_bytes) / total_bytes, 2)
+                    memory_access["ram_write_pct"] = round(100.0 * (perf_data["llc_store_misses"] * cache_line_bytes) / total_bytes, 2)
+                else:
+                    memory_access["ram_read_pct"] = None
+                    memory_access["ram_write_pct"] = None
+            else:
+                memory_access["ram_total_bytes"] = None
+                memory_access["ram_total_mb"] = None
+                memory_access["ram_total_bandwidth_mbps"] = None
+                memory_access["ram_read_pct"] = None
+                memory_access["ram_write_pct"] = None
+            
+            # Alternative: L1 data cache traffic (gives cache-level bandwidth, not RAM)
+            # This shows total memory operations at L1 level (useful for comparison)
+            if perf_data.get("l1_dcache_loads") is not None and perf_data.get("l1_dcache_stores") is not None:
+                l1_traffic_bytes = (perf_data["l1_dcache_loads"] + perf_data["l1_dcache_stores"]) * cache_line_bytes
+                memory_access["l1_cache_traffic_mb"] = round(l1_traffic_bytes / (1024 * 1024), 3)
+                memory_access["l1_cache_bandwidth_mbps"] = round(l1_traffic_bytes / (1024 * 1024 * elapsed), 3)
+            else:
+                memory_access["l1_cache_traffic_mb"] = None
+                memory_access["l1_cache_bandwidth_mbps"] = None
+        else:
+            # No elapsed time - set all bandwidth fields to None
+            memory_access["ram_read_bytes"] = None
+            memory_access["ram_read_mb"] = None
+            memory_access["ram_read_bandwidth_mbps"] = None
+            memory_access["ram_write_bytes"] = None
+            memory_access["ram_write_mb"] = None
+            memory_access["ram_write_bandwidth_mbps"] = None
+            memory_access["ram_total_bytes"] = None
+            memory_access["ram_total_mb"] = None
+            memory_access["ram_total_bandwidth_mbps"] = None
+            memory_access["ram_read_pct"] = None
+            memory_access["ram_write_pct"] = None
+            memory_access["l1_cache_traffic_mb"] = None
+            memory_access["l1_cache_bandwidth_mbps"] = None
     else:
         # Provide a helpful note if perf wasn't usable
         if not perf_usable and perf_ok:
@@ -500,22 +741,84 @@ def main():
                 level = None
             cpu["note"] = f"perf unusable (perf_event_paranoid={level})" if level is not None else "perf unusable (permission restricted)"
 
-    scheduling = {}
-    if "context_switches" in perf_data: scheduling["context_switches"] = perf_data["context_switches"]
-    if "cpu_migrations" in perf_data: scheduling["cpu_migrations"] = perf_data["cpu_migrations"]
-    # Syscalls summary via strace -c
-    strace_res = run_strace_summary(binary, program_args)
-    if strace_res:
-        scheduling["syscalls"] = strace_res
+    # Detect number of threads by counting tasks in /proc during execution
+    # We'll run a quick check to see how many threads the process spawns
+    def count_threads(binary: str, args: list) -> int:
+        """Count threads by running the binary and checking /proc/{pid}/task/"""
+        try:
+            proc = subprocess.Popen([binary, *args], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            time.sleep(0.01)  # Give it a moment to spawn threads
+            task_dir = f"/proc/{proc.pid}/task"
+            if os.path.exists(task_dir):
+                thread_count = len(os.listdir(task_dir))
+            else:
+                thread_count = 1
+            proc.terminate()
+            proc.wait(timeout=1)
+            return thread_count
+        except Exception:
+            return 1  # Default to single-threaded if we can't detect
+    
+    num_threads = count_threads(binary, program_args)
+    
+    concurrency = {}
+    if perf_data:
+        if "context_switches" in perf_data: concurrency["context_switches"] = perf_data["context_switches"]
+        if "cpu_migrations" in perf_data: concurrency["cpu_migrations"] = perf_data["cpu_migrations"]
+        # Context switching rate
+        if "context_switches" in perf_data and "elapsed_s" in timing and timing.get("elapsed_s"):
+            concurrency["ctx_switches_per_second"] = int(perf_data["context_switches"] / timing["elapsed_s"])
+        if "cpu_migrations" in perf_data and "elapsed_s" in timing and timing.get("elapsed_s"):
+            concurrency["migrations_per_second"] = int(perf_data["cpu_migrations"] / timing["elapsed_s"])
+    concurrency["threads"] = num_threads
 
+    # Syscalls summary via strace -c
+    syscalls = run_strace_summary(binary, program_args)
+
+    # Combine memory and memory_access into one section - always include all fields
     memory = {}
-    if "page_faults" in perf_data: memory["page_faults"] = perf_data["page_faults"]
+    # TLB stats - always present
+    memory["dtlb_loads"] = memory_access.get("dtlb_loads")
+    memory["dtlb_load_misses"] = memory_access.get("dtlb_load_misses")
+    memory["dtlb_miss_rate_pct"] = memory_access.get("dtlb_miss_rate_pct")
+    memory["itlb_loads"] = memory_access.get("itlb_loads")
+    memory["itlb_load_misses"] = memory_access.get("itlb_load_misses")
+    memory["itlb_miss_rate_pct"] = memory_access.get("itlb_miss_rate_pct")
+    
+    # Page faults - always present
+    memory["page_faults"] = memory_access.get("page_faults")
+    memory["minor_faults"] = memory_access.get("minor_faults")
+    memory["major_faults"] = memory_access.get("major_faults")
+    
+    # Fault types - always present
+    memory["alignment_faults"] = memory_access.get("alignment_faults")
+    memory["emulation_faults"] = memory_access.get("emulation_faults")
+    
+    # RAM bandwidth (from LLC misses) - always present
+    memory["ram_read_bytes"] = memory_access.get("ram_read_bytes")
+    memory["ram_read_mb"] = memory_access.get("ram_read_mb")
+    memory["ram_read_bandwidth_mbps"] = memory_access.get("ram_read_bandwidth_mbps")
+    memory["ram_write_bytes"] = memory_access.get("ram_write_bytes")
+    memory["ram_write_mb"] = memory_access.get("ram_write_mb")
+    memory["ram_write_bandwidth_mbps"] = memory_access.get("ram_write_bandwidth_mbps")
+    memory["ram_total_bytes"] = memory_access.get("ram_total_bytes")
+    memory["ram_total_mb"] = memory_access.get("ram_total_mb")
+    memory["ram_total_bandwidth_mbps"] = memory_access.get("ram_total_bandwidth_mbps")
+    memory["ram_read_pct"] = memory_access.get("ram_read_pct")
+    memory["ram_write_pct"] = memory_access.get("ram_write_pct")
+    
+    # L1 cache bandwidth (total memory operations) - always present
+    memory["l1_cache_traffic_mb"] = memory_access.get("l1_cache_traffic_mb")
+    memory["l1_cache_bandwidth_mbps"] = memory_access.get("l1_cache_bandwidth_mbps")
+    
     # Max RSS from /usr/bin/time -v
     max_rss_kb = run_max_rss_kb(binary, program_args)
     if max_rss_kb is not None:
         memory["max_rss_kb"] = max_rss_kb
+    
     # Valgrind Massif
     memory.update(run_valgrind(binary, program_args))
+    
     # Valgrind Memcheck leak summary
     memcheck = run_valgrind_memcheck(binary, program_args)
     if memcheck:
@@ -531,7 +834,9 @@ def main():
         },
         "timing": timing,
         "cpu": cpu,
-        "scheduling": scheduling,
+        "cache": cache,
+        "concurrency": concurrency,
+        "syscalls": syscalls,
         "memory": memory
     }
 
