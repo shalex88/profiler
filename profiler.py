@@ -49,12 +49,66 @@ def run_perf_stat(binary: str, args: list) -> Dict[str, Any]:
             metrics["sys_s"] = float(line.strip().split()[0])
     return metrics
 
+def run_time_v_timing(binary: str, args: list) -> Dict[str, Any]:
+    """Run /usr/bin/time -v and parse elapsed, user, sys seconds.
+    Returns keys: elapsed_s, user_s, sys_s, wait_time_s (when derivable).
+    """
+    time_path = "/usr/bin/time"
+    if not os.path.exists(time_path):
+        return {}
+    tmp = tempfile.NamedTemporaryFile(delete=False, mode="w+")
+    tmp.close()
+    try:
+        cmd = [time_path, "-v", "-o", tmp.name, binary, *args]
+        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        timing: Dict[str, Any] = {}
+
+        def parse_elapsed_to_seconds(s: str):
+            try:
+                s = s.strip()
+                if ":" not in s:
+                    return float(s)
+                parts = [p.strip() for p in s.split(":")]
+                secs = float(parts[-1])
+                mins = int(parts[-2]) if len(parts) >= 2 else 0
+                hrs = int(parts[-3]) if len(parts) >= 3 else 0
+                return hrs * 3600.0 + mins * 60.0 + secs
+            except Exception:
+                return None
+
+        with open(tmp.name, "r") as f:
+            for line in f:
+                ls = line.strip()
+                if ls.startswith("User time (seconds):"):
+                    try:
+                        timing["user_s"] = float(ls.split(":", 1)[1].strip())
+                    except Exception:
+                        pass
+                elif ls.startswith("System time (seconds):"):
+                    try:
+                        timing["sys_s"] = float(ls.split(":", 1)[1].strip())
+                    except Exception:
+                        pass
+                elif ls.startswith("Elapsed (wall clock) time"):
+                    # Use rsplit to avoid splitting inside "h:mm:ss" text
+                    val = ls.rsplit(":", 1)[1].strip()
+                    ev = parse_elapsed_to_seconds(val)
+                    if ev is not None:
+                        timing["elapsed_s"] = ev
+        # Derive wait time
+        if all(k in timing for k in ("elapsed_s", "user_s", "sys_s")):
+            timing["wait_time_s"] = max(0.0, timing["elapsed_s"] - (timing["user_s"] + timing["sys_s"]))
+        return timing
+    finally:
+        try:
+            os.unlink(tmp.name)
+        except Exception:
+            pass
+
 def run_strace_summary(binary: str, args: list) -> Dict[str, Any]:
     """Run strace -f -c and parse syscall summary into structured JSON.
     Returns { syscalls: [...], total: {...} } or { raw: "..." } on parse issues.
     """
-    if not shutil.which("strace"):
-        return {"error": "strace not found"}
     tmp = tempfile.NamedTemporaryFile(delete=False)
     tmp.close()
     try:
@@ -133,8 +187,6 @@ def run_strace_summary(binary: str, args: list) -> Dict[str, Any]:
 
 def run_valgrind_memcheck(binary: str, args: list) -> Dict[str, Any]:
     """Run valgrind memcheck and parse leak summary and error count."""
-    if not shutil.which("valgrind"):
-        return {"error": "valgrind not found"}
     # Capture stderr where memcheck writes its summary
     proc = subprocess.run([
         "valgrind", "--tool=memcheck", "--leak-check=summary", "--track-origins=no",
@@ -212,9 +264,6 @@ def run_valgrind(binary: str, args: list) -> Dict[str, Any]:
     """Run valgrind Massif and parse peak memory from the raw massif output.
     Returns keys with _bytes suffix and additional context (snapshot/time).
     """
-    if not shutil.which("valgrind"):
-        return {"error": "valgrind not found"}
-
     massif_out = tempfile.NamedTemporaryFile(delete=False)
     massif_out.close()
     cmd = [
@@ -300,6 +349,46 @@ def main():
     known_args, program_args = parser.parse_known_args()
 
     binary = known_args.binary
+    
+    # Check for required tools before execution
+    missing_tools = []
+    # perf presence and usability
+    perf_ok = False
+    perf_usable = False
+    perf_note = None
+    if shutil.which("perf"):
+        try:
+            rv = subprocess.run(["perf", "version"], capture_output=True, text=True, timeout=3)
+            perf_ok = (rv.returncode == 0 and "perf version" in (rv.stdout or ""))
+        except Exception:
+            perf_ok = False
+        if perf_ok:
+            try:
+                test = subprocess.run(["perf", "stat", "-e", "task-clock", "/bin/true"], capture_output=True, text=True, timeout=4)
+                out = (test.stdout or "") + (test.stderr or "")
+                if test.returncode == 0 and "task-clock" in out:
+                    perf_usable = True
+                else:
+                    perf_usable = False
+            except Exception as e:
+                perf_usable = False
+        else:
+            # present but version failed; treat as missing
+            pass
+    else:
+        perf_ok = False
+
+    if not perf_ok:
+        missing_tools.append("perf")
+    if not shutil.which("valgrind"):
+        missing_tools.append("valgrind")
+    if not shutil.which("strace"):
+        missing_tools.append("strace")
+    
+    if missing_tools:
+        print(f"Error: Missing required tools: {', '.join(missing_tools)}", file=sys.stderr)
+        print("Please install them before running the profiler.", file=sys.stderr)
+        sys.exit(1)
     # Ensure output ends with .json
     output_path = known_args.output
     if not output_path.lower().endswith(".json"):
@@ -354,12 +443,12 @@ def main():
         stripped_size = os.path.getsize(tmp_stripped.name)
         os.unlink(tmp_stripped.name)
 
-    perf_data = run_perf_stat(binary, program_args)
-    # Wait time: elapsed - (user + sys)
+    perf_data = run_perf_stat(binary, program_args) if perf_usable else {}
+    # Wait time: elapsed - (user + sys), clamped to non-negative
     wait_time = None
     try:
         if "elapsed_s" in perf_data and "user_s" in perf_data and "sys_s" in perf_data:
-            wait_time = perf_data["elapsed_s"] - (perf_data["user_s"] + perf_data["sys_s"])
+            wait_time = max(0.0, perf_data["elapsed_s"] - (perf_data["user_s"] + perf_data["sys_s"]))
     except Exception:
         wait_time = None
 
@@ -379,18 +468,37 @@ def main():
         except Exception:
             cores = 1
         timing["cpu_utilization_per_core_pct"] = round(util / cores, 3)
+    # Fallback to /usr/bin/time -v to populate missing timing
+    if "elapsed_s" not in timing or "user_s" not in timing or "sys_s" not in timing:
+        tv = run_time_v_timing(binary, program_args)
+        # only add if not present
+        for k, v in tv.items():
+            if k not in timing:
+                timing[k] = v
 
     cpu = {}
-    if "instructions" in perf_data: cpu["instructions"] = perf_data["instructions"]
-    if "cycles" in perf_data: cpu["cycles"] = perf_data["cycles"]
-    if "instructions" in perf_data and "cycles" in perf_data and perf_data["cycles"]:
-        cpu["ipc"] = round(perf_data["instructions"] / perf_data["cycles"], 6)
-    if "branches" in perf_data: cpu["branches"] = perf_data["branches"]
-    if "branch_misses" in perf_data: cpu["branch_misses"] = perf_data["branch_misses"]
-    if "cache_misses" in perf_data: cpu["cache_misses"] = perf_data["cache_misses"]
-    # Instruction rate
-    if "instructions" in cpu and "elapsed_s" in timing and timing["elapsed_s"]:
-        cpu["instructions_per_second"] = int(cpu["instructions"] / timing["elapsed_s"])
+    if perf_data:
+        if "instructions" in perf_data: cpu["instructions"] = perf_data["instructions"]
+        if "cycles" in perf_data: cpu["cycles"] = perf_data["cycles"]
+        if "instructions" in perf_data and "cycles" in perf_data and perf_data["cycles"]:
+            cpu["ipc"] = round(perf_data["instructions"] / perf_data["cycles"], 6)
+        if "branches" in perf_data: cpu["branches"] = perf_data["branches"]
+        if "branch_misses" in perf_data: cpu["branch_misses"] = perf_data["branch_misses"]
+        if "cache_misses" in perf_data: cpu["cache_misses"] = perf_data["cache_misses"]
+        # Instruction rate
+        if "instructions" in cpu and "elapsed_s" in timing and timing.get("elapsed_s"):
+            cpu["instructions_per_second"] = int(cpu["instructions"] / timing["elapsed_s"])
+    else:
+        # Provide a helpful note if perf wasn't usable
+        if not perf_usable and perf_ok:
+            # Try to read paranoid level for context
+            level = None
+            try:
+                with open("/proc/sys/kernel/perf_event_paranoid", "r") as pf:
+                    level = pf.read().strip()
+            except Exception:
+                level = None
+            cpu["note"] = f"perf unusable (perf_event_paranoid={level})" if level is not None else "perf unusable (permission restricted)"
 
     scheduling = {}
     if "context_switches" in perf_data: scheduling["context_switches"] = perf_data["context_switches"]
@@ -414,7 +522,7 @@ def main():
         memory["memcheck"] = memcheck
 
     result = {
-        "binary": binary,
+        "binary": os.path.basename(binary),
         "architecture": arch,
         "binary_footprint": {
             "unstripped_bytes": unstripped_size,
