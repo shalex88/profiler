@@ -40,6 +40,21 @@ def classify_performance(
     except Exception:
         syscalls_total_seconds = None
 
+    # Detect short-lived / startup-dominated workload
+    # Criteria: very short elapsed time AND syscalls dominated by execve/mmap (startup)
+    short_app = False
+    if elapsed and elapsed < 0.1:  # less than 100ms
+        # Check if top syscalls are startup-related
+        try:
+            rows = (syscalls or {}).get("syscalls", [])
+            if rows:
+                startup_syscalls = {"execve", "mmap", "munmap", "mprotect", "brk", "access", "openat", "close", "fstat", "read"}
+                startup_time = sum(r.get("seconds", 0.0) for r in rows if r.get("syscall") in startup_syscalls)
+                if syscalls_total_seconds and startup_time / syscalls_total_seconds > 0.7:
+                    short_app = True
+        except Exception:
+            pass
+
     # Heuristics
     io_cond = (wait_frac >= 0.2) or (elapsed and syscalls_total_seconds and (syscalls_total_seconds / elapsed) >= 0.3)
     # Memory-bound heuristic
@@ -80,7 +95,15 @@ def classify_performance(
     # Primary bottleneck selection
     primary_bottleneck = "CPU"
     reasons = []
-    if io_cond:
+    
+    # Override: short-lived app gets "No bottleneck" classification
+    if short_app:
+        primary_bottleneck = "No bottleneck"
+        reasons.append({
+            "elapsed_s": elapsed,
+            "note": "Short-lived app (< 100ms). Execution dominated by startup syscalls (execve/mmap). No meaningful steady-state bottleneck detected."
+        })
+    elif io_cond:
         primary_bottleneck = "I/O/Wait"
         reasons.append({"io_wait_frac": round(wait_frac, 3), "syscalls_total_seconds": syscalls_total_seconds})
     elif mem_cond:
@@ -117,7 +140,9 @@ def classify_performance(
     # Parallel potential heuristic
     threads = get(concurrency, "threads") or 1
     cpu_util_per_core = get(timing, "cpu_utilization_per_core_pct") or 0.0
-    if primary_bottleneck == "Memory" or io_cond:
+    if primary_bottleneck == "No bottleneck":
+        parallel_potential = "n/a"
+    elif primary_bottleneck == "Memory" or io_cond:
         parallel_potential = "low"
     elif primary_bottleneck == "CPU" and threads <= 1 and (ipc or 0) >= 1.0:
         parallel_potential = "high"
@@ -128,7 +153,9 @@ def classify_performance(
 
     # Confidence score (rough): number of signals supporting the chosen bottleneck
     confidence = 0.5
-    if primary_bottleneck == "Memory":
+    if primary_bottleneck == "No bottleneck":
+        confidence = 0.9  # High confidence for short apps
+    elif primary_bottleneck == "Memory":
         score = 0
         if llc_miss_rate is not None and llc_miss_rate >= 5.0: score += 1
         if l1d_miss_rate is not None and l1d_miss_rate >= 10.0: score += 1
@@ -171,6 +198,9 @@ def classify_performance(
 
     # Generate actionable optimization suggestions based on bottleneck and metrics
     suggestions = []
+    
+    if primary_bottleneck == "No bottleneck":
+        suggestions.append("Short-lived application (< 100ms runtime). Startup overhead dominates execution. No optimization opportunities for steady-state performance. If running many instances, consider batching or keeping process alive.")
     
     # Detect potential profiling artifacts: high IPC + low syscall overhead but code likely does I/O
     # This happens when stdout is redirected during profiling, causing buffering
