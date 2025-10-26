@@ -70,8 +70,12 @@ def run_perf_stat(binary: str, args: list) -> Dict[str, Any]:
         line_lower = line.lower()
         
         # Timing
-        if "task-clock" in line_lower and "msec" in line_lower:
-            metrics["task_clock_ms"] = float(parts[0].replace(",", ""))
+        if "task-clock" in line_lower:
+            # perf prints like: <val> msec task-clock
+            try:
+                metrics["task_clock_ms"] = float(parts[0].replace(",", ""))
+            except Exception:
+                pass
         elif "seconds time elapsed" in line_lower:
             metrics["elapsed_s"] = float(parts[0])
         elif "seconds user" in line_lower:
@@ -80,18 +84,18 @@ def run_perf_stat(binary: str, args: list) -> Dict[str, Any]:
             metrics["sys_s"] = float(parts[0])
         
         # Core execution
-        elif "instructions" in line_lower and "insn per cycle" in line_lower:
+        elif "instructions" in line_lower:
             metrics["instructions"] = value
-        elif "cycles" in line_lower and "ghz" in line_lower:
-            metrics["cycles"] = value
         elif "ref-cycles" in line_lower or "reference cycles" in line_lower:
             metrics["ref_cycles"] = value
+        elif "cycles" in line_lower and "ref-cycles" not in line_lower:
+            metrics["cycles"] = value
         
         # Branching
-        elif "branches" in line_lower and "m/sec" in line_lower:
-            metrics["branches"] = value
         elif "branch-misses" in line_lower:
             metrics["branch_misses"] = value
+        elif "branches" in line_lower:
+            metrics["branches"] = value
         
         # L1 Data Cache
         elif "l1-dcache-loads" in line_lower or "l1d.replacement" in line_lower:
@@ -102,7 +106,7 @@ def run_perf_stat(binary: str, args: list) -> Dict[str, Any]:
             metrics["l1_dcache_stores"] = value
         
         # L1 Instruction Cache
-        elif "l1-icache-loads" in line_lower or "l1i.replacement" in line_lower:
+        elif "l1-icache-loads" in line_lower or "l1i.replacements" in line_lower or "l1i.replacement" in line_lower:
             metrics["l1_icache_loads"] = value
         elif "l1-icache-load-misses" in line_lower:
             metrics["l1_icache_load_misses"] = value
@@ -118,7 +122,7 @@ def run_perf_stat(binary: str, args: list) -> Dict[str, Any]:
             metrics["llc_store_misses"] = value
         
         # TLB
-        elif "dtlb-loads" in line_lower:
+        elif "dtlb-loads" in line_lower or "dtlb-loads" in line:
             metrics["dtlb_loads"] = value
         elif "dtlb-load-misses" in line_lower:
             metrics["dtlb_load_misses"] = value
@@ -655,7 +659,8 @@ def main():
         cache["l1d_load_misses"] = perf_data.get("l1_dcache_load_misses")
         cache["l1d_stores"] = perf_data.get("l1_dcache_stores")
         if perf_data.get("l1_dcache_loads") and perf_data.get("l1_dcache_load_misses"):
-            cache["l1d_miss_rate_pct"] = round(100.0 * perf_data["l1_dcache_load_misses"] / perf_data["l1_dcache_loads"], 6)
+            rate = 100.0 * perf_data["l1_dcache_load_misses"] / max(1, perf_data["l1_dcache_loads"])
+            cache["l1d_miss_rate_pct"] = round(min(rate, 100.0), 6)
         else:
             cache["l1d_miss_rate_pct"] = None
         
@@ -663,7 +668,8 @@ def main():
         cache["l1i_loads"] = perf_data.get("l1_icache_loads")
         cache["l1i_load_misses"] = perf_data.get("l1_icache_load_misses")
         if perf_data.get("l1_icache_loads") and perf_data.get("l1_icache_load_misses"):
-            cache["l1i_miss_rate_pct"] = round(100.0 * perf_data["l1_icache_load_misses"] / perf_data["l1_icache_loads"], 6)
+            rate = 100.0 * perf_data["l1_icache_load_misses"] / max(1, perf_data["l1_icache_loads"])
+            cache["l1i_miss_rate_pct"] = round(min(rate, 100.0), 6)
         else:
             cache["l1i_miss_rate_pct"] = None
         
@@ -673,7 +679,8 @@ def main():
         cache["llc_stores"] = perf_data.get("llc_stores")
         cache["llc_store_misses"] = perf_data.get("llc_store_misses")
         if perf_data.get("llc_loads") and perf_data.get("llc_load_misses"):
-            cache["llc_miss_rate_pct"] = round(100.0 * perf_data["llc_load_misses"] / perf_data["llc_loads"], 6)
+            rate = 100.0 * perf_data["llc_load_misses"] / max(1, perf_data["llc_loads"])
+            cache["llc_miss_rate_pct"] = round(min(rate, 100.0), 6)
         else:
             cache["llc_miss_rate_pct"] = None
         
@@ -683,11 +690,13 @@ def main():
         memory_access["itlb_loads"] = perf_data.get("itlb_loads")
         memory_access["itlb_load_misses"] = perf_data.get("itlb_load_misses")
         if perf_data.get("dtlb_loads") and perf_data.get("dtlb_load_misses"):
-            memory_access["dtlb_miss_rate_pct"] = round(100.0 * perf_data["dtlb_load_misses"] / perf_data["dtlb_loads"], 6)
+            rate = 100.0 * perf_data["dtlb_load_misses"] / max(1, perf_data["dtlb_loads"])
+            memory_access["dtlb_miss_rate_pct"] = round(min(rate, 100.0), 6)
         else:
             memory_access["dtlb_miss_rate_pct"] = None
         if perf_data.get("itlb_loads") and perf_data.get("itlb_load_misses"):
-            memory_access["itlb_miss_rate_pct"] = round(100.0 * perf_data["itlb_load_misses"] / perf_data["itlb_loads"], 6)
+            rate = 100.0 * perf_data["itlb_load_misses"] / max(1, perf_data["itlb_loads"])
+            memory_access["itlb_miss_rate_pct"] = round(min(rate, 100.0), 6)
         else:
             memory_access["itlb_miss_rate_pct"] = None
         
@@ -811,9 +820,9 @@ def main():
         if "cpu_migrations" in perf_data: concurrency["cpu_migrations"] = perf_data["cpu_migrations"]
         # Context switching rate
         if "context_switches" in perf_data and "elapsed_s" in timing and timing.get("elapsed_s"):
-            concurrency["ctx_switches_per_second"] = int(perf_data["context_switches"] / timing["elapsed_s"])
+            concurrency["ctx_switches_per_second"] = round(perf_data["context_switches"] / timing["elapsed_s"], 3)
         if "cpu_migrations" in perf_data and "elapsed_s" in timing and timing.get("elapsed_s"):
-            concurrency["migrations_per_second"] = int(perf_data["cpu_migrations"] / timing["elapsed_s"])
+            concurrency["migrations_per_second"] = round(perf_data["cpu_migrations"] / timing["elapsed_s"], 3)
     concurrency["threads"] = num_threads
 
     # Syscalls summary via strace -c
