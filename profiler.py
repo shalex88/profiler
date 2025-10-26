@@ -10,6 +10,16 @@ import shutil
 import time
 from typing import Dict, Any
 
+
+def ensure_keys(dest: dict, defaults: dict) -> None:
+    """Ensure that each key from defaults exists in dest; set to default value when missing.
+
+    This makes the output schema stable: absent measurements become explicit None values.
+    """
+    for k, v in defaults.items():
+        if k not in dest:
+            dest[k] = v
+
 def run_perf_stat(binary: str, args: list) -> Dict[str, Any]:
     # Extended event list for comprehensive performance analysis
     events = [
@@ -823,6 +833,130 @@ def main():
     memcheck = run_valgrind_memcheck(binary, program_args)
     if memcheck:
         memory["memcheck"] = memcheck
+
+    # --- Ensure stable schema: fill missing keys with explicit None defaults ---
+    default_timing = {
+        "elapsed_s": None,
+        "user_s": None,
+        "sys_s": None,
+        "wait_time_s": None,
+        "task_clock_ms": None,
+        "cpu_utilization_pct": None,
+        "cpu_utilization_per_core_pct": None,
+    }
+
+    default_cpu = {
+        "instructions": None,
+        "cycles": None,
+        "ref_cycles": None,
+        "ipc": None,
+        "frequency_ratio": None,
+        "stalled_cycles_frontend": None,
+        "frontend_stall_pct": None,
+        "stalled_cycles_backend": None,
+        "backend_stall_pct": None,
+        "branches": None,
+        "branch_misses": None,
+        "branch_miss_rate_pct": None,
+        "instructions_per_second": None,
+        "note": None,
+    }
+
+    default_cache = {
+        "l1d_loads": None,
+        "l1d_load_misses": None,
+        "l1d_stores": None,
+        "l1d_miss_rate_pct": None,
+        "l1i_loads": None,
+        "l1i_load_misses": None,
+        "l1i_miss_rate_pct": None,
+        "llc_loads": None,
+        "llc_load_misses": None,
+        "llc_stores": None,
+        "llc_store_misses": None,
+        "llc_miss_rate_pct": None,
+    }
+
+    default_concurrency = {
+        "context_switches": None,
+        "cpu_migrations": None,
+        "ctx_switches_per_second": None,
+        "migrations_per_second": None,
+        "threads": num_threads if 'num_threads' in locals() else None,
+    }
+
+    default_memory = {
+        # TLB
+        "dtlb_loads": None,
+        "dtlb_load_misses": None,
+        "dtlb_miss_rate_pct": None,
+        "itlb_loads": None,
+        "itlb_load_misses": None,
+        "itlb_miss_rate_pct": None,
+        # Page faults
+        "page_faults": None,
+        "minor_faults": None,
+        "major_faults": None,
+        # Fault types
+        "alignment_faults": None,
+        "emulation_faults": None,
+        # RAM bandwidth
+        "ram_read_bytes": None,
+        "ram_read_mb": None,
+        "ram_read_bandwidth_mbps": None,
+        "ram_write_bytes": None,
+        "ram_write_mb": None,
+        "ram_write_bandwidth_mbps": None,
+        "ram_total_bytes": None,
+        "ram_total_mb": None,
+        "ram_total_bandwidth_mbps": None,
+        "ram_read_pct": None,
+        "ram_write_pct": None,
+        # L1 cache traffic
+        "l1_cache_traffic_mb": None,
+        "l1_cache_bandwidth_mbps": None,
+        # Max RSS
+        "max_rss_kb": None,
+        # Massif peaks
+        "massif_peak_heap_bytes": None,
+        "massif_peak_heap_extra_bytes": None,
+        "massif_peak_total_bytes": None,
+        "massif_peak_stacks_bytes": None,
+        "massif_peak_time": None,
+        "massif_peak_snapshot": None,
+        # Memcheck
+        "memcheck": None,
+    }
+
+    # Binary footprint defaults
+    default_footprint = {
+        "unstripped_bytes": None,
+        "stripped_bytes": None,
+        "sections": None,
+    }
+
+    # Ensure top-level dicts include all expected keys (fill with None when absent)
+    ensure_keys(timing, default_timing)
+    ensure_keys(cpu, default_cpu)
+    ensure_keys(cache, default_cache)
+    ensure_keys(concurrency, default_concurrency)
+    ensure_keys(memory, default_memory)
+    ensure_keys(result := {}, {})  # ensure result exists for later construction (no-op)
+
+    # Apply defaults to binary footprint container
+    # `unstripped_size` and `stripped_size` already computed; keep them but ensure keys exist
+    binary_footprint = {
+        "unstripped_bytes": unstripped_size if 'unstripped_size' in locals() else None,
+        "stripped_bytes": stripped_size if 'stripped_size' in locals() else None,
+        "sections": mem_sections,
+    }
+    ensure_keys(binary_footprint, default_footprint)
+
+    # Ensure syscalls output is always a dict with either syscalls/total or raw
+    if not isinstance(syscalls, dict):
+        syscalls = {"raw": str(syscalls)}
+    if "syscalls" not in syscalls and "raw" not in syscalls:
+        syscalls = {"syscalls": [], "total": {}}
 
     result = {
         "binary": os.path.basename(binary),
