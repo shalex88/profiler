@@ -467,6 +467,40 @@ def main():
         except Exception:
             perf_ok = False
         if perf_ok:
+            # Check kernel perf_event_paranoid level early and REQUIRE it to be exactly '1'.
+            # Many systems set this to a restrictive value; per your request we only
+            # proceed when it's 1.
+            perf_paranoid_level = None
+            try:
+                with open("/proc/sys/kernel/perf_event_paranoid", "r") as pf:
+                    perf_paranoid_level = pf.read().strip()
+            except Exception:
+                perf_paranoid_level = None
+
+            # Enforce exact value of 1. If it's not 1, abort with a helpful message.
+            if perf_paranoid_level is None:
+                print("Error: unable to determine /proc/sys/kernel/perf_event_paranoid.\n"
+                      "perf requires perf_event_paranoid == 1 to run unprivileged counters.", file=sys.stderr)
+                sys.exit(1)
+
+            try:
+                if int(perf_paranoid_level) != 1:
+                    print(f"Error: kernel perf_event_paranoid={perf_paranoid_level}.\n"
+                          "This profiler requires perf_event_paranoid to be set to 1 to run perf counters unprivileged.\n"
+                          "Set it as root with: sudo sh -c 'echo 1 > /proc/sys/kernel/perf_event_paranoid'\n"
+                          "Or run with appropriate privileges.", file=sys.stderr)
+                    sys.exit(1)
+                # paranoid == 1, do a quick perf probe to confirm usability
+                test = subprocess.run(["perf", "stat", "-e", "task-clock", "/bin/true"], capture_output=True, text=True, timeout=4)
+                out = (test.stdout or "") + (test.stderr or "")
+                if test.returncode == 0 and "task-clock" in out:
+                    perf_usable = True
+                else:
+                    perf_usable = False
+                    perf_note = f"perf probe failed despite perf_event_paranoid=1"
+            except Exception:
+                print("Error: unexpected failure while probing perf; ensure perf is installed and usable.", file=sys.stderr)
+                sys.exit(1)
             try:
                 test = subprocess.run(["perf", "stat", "-e", "task-clock", "/bin/true"], capture_output=True, text=True, timeout=4)
                 out = (test.stdout or "") + (test.stderr or "")
